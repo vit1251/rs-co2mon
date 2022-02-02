@@ -8,3 +8,7 @@ or
 
     $ sudo RUST_LOG=info ./rs-co2mon
 
+
+# About the CO2 monitor
+
+https://duckduckgo.com/?q=KIT+MT8057S
