@@ -4,11 +4,16 @@ use log::{info, trace, warn, debug, error};
 use hidapi::HidApi;
 use hidapi::HidDevice;
 
-const CODE_TAMB : u8 = 0x42; /* Ambient Temperature */
+const CODE_HUMD : u8 = 0x41; /* Humidity                      */
+const CODE_TAMB : u8 = 0x42; /* Ambient Temperature           */
 const CODE_CNTR : u8 = 0x50; /* Relative Concentration of CO2 */
 
+fn decode_humidity(w: u16) -> f64 {
+    w as f64 / 100.0
+}
+
 fn decode_temperature(w: u16) -> f64 {
-    return w as f64 * 0.0625 - 273.15;
+    w as f64 / 16.0 - 273.15
 }
 
 fn dump(raw: &[u8; 8]) {
@@ -29,6 +34,7 @@ pub struct AirQualityMonitor {
 pub enum AirQulityEvent {
     AmbientTemperature { temp: f64 },
     RelativeConcentration { value: u16 },
+    Humidity { value: f64 },
     UnexpectedData,
     ChecksumError,
     UninitializeData,
@@ -111,6 +117,10 @@ impl Iterator for AirQualityMonitor {
         /* Decode result */
         let w : u16 = ((result[1] as u16) << 8) + result[2] as u16;
         match r0 {
+            CODE_HUMD => {
+                let h = decode_humidity(w);
+                return Some(AirQulityEvent::Humidity{ value: h });
+            },
             CODE_TAMB => {
                 let t = decode_temperature(w);
                 info!("Ambient Temperature is {}", t);
@@ -141,7 +151,7 @@ impl AirQualityMonitor {
     pub fn new() -> Self {
         AirQualityMonitor {
             dev: None,
-            debug: false,
+            debug: true,
             magic_table: [0; 8],
         }
     }
