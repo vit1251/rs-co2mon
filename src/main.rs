@@ -1,12 +1,13 @@
 
 use std::env;
+use std::time::Duration;
 
 use log::LevelFilter;
 use env_logger::Builder;
 
 use telegraf::{Client, Point};
 
-use rs_co2mon::AirQualityMonitor;
+use rs_co2mon::{Sensor, OpenOptions};
 use rs_co2mon::AirQulityEvent::AmbientTemperature;
 use rs_co2mon::AirQulityEvent::RelativeConcentration;
 
@@ -38,10 +39,14 @@ fn main() {
     }
 
     /* Step 3. Create Air Quality Monitor */
-    let mut air_mon = AirQualityMonitor::new();
-    air_mon.open(); //.unwrap();
+    let mut sensor = OpenOptions::new()
+        .with_key([0x62, 0xea, 0x1d, 0x4f, 0x14, 0xfa, 0xe5, 0x6c])
+//        .debug(true)
+        .timeout(Some(Duration::from_secs(1)))
+        .open()
+        .unwrap();
 
-    for event in air_mon {
+    for event in sensor {
         if let Some(ref mut conn) = c {
             match event {
                 AmbientTemperature { temp } => {

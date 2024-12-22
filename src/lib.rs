@@ -1,8 +1,12 @@
 
+use std::time::Duration; 
+
 use log::{info, trace, warn, debug, error};
 
 use hidapi::HidApi;
 use hidapi::HidDevice;
+
+mod error;
 
 const CODE_HUMD : u8 = 0x41; /* Humidity                      */
 const CODE_TAMB : u8 = 0x42; /* Ambient Temperature           */
@@ -24,10 +28,16 @@ fn dump(raw: &[u8; 8]) {
     debug!("------");
 }
 
-pub struct AirQualityMonitor {
-    dev: Option<HidDevice>,    /* USB device hander */
+pub use error::Error;
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+pub struct Sensor {
+    dev: HidDevice,            /* USB device hander */
     debug: bool,               /* Debug packet      */
-    magic_table: [u8; 8],      /* XOR coding key    */
+    decode: bool,              /* Use decode        */
+    key: [u8; 8],              /* Key               */
+    timeout: Option<Duration>, /* Timeout           */
 }
 
 #[derive(Debug)]
@@ -38,67 +48,70 @@ pub enum AirQulityEvent {
     UnexpectedData,
     ChecksumError,
     UninitializeData,
-    UnknownCode,
+    UnknownCode([u8; 8]),
 }
 
-impl Iterator for AirQualityMonitor {
+fn decrypt(mut data: [u8; 8], key: [u8; 8]) -> [u8; 8] {
+
+    data.swap(0, 2);
+    data.swap(1, 4);
+    data.swap(3, 7);
+    data.swap(5, 6);
+
+    for (r, k) in data.iter_mut().zip(key.iter()) {
+        *r ^= k;
+    }
+
+    let tmp : u8 = data[7] << 5;
+    data[7] = (data[6] << 5) | (data[7] >> 3);
+    data[6] = (data[5] << 5) | (data[6] >> 3);
+    data[5] = (data[4] << 5) | (data[5] >> 3);
+    data[4] = (data[3] << 5) | (data[4] >> 3);
+    data[3] = (data[2] << 5) | (data[3] >> 3);
+    data[2] = (data[1] << 5) | (data[2] >> 3);
+    data[1] = (data[0] << 5) | (data[1] >> 3);
+    data[0] = tmp | (data[0] >> 3);
+
+    for (r, m) in data.iter_mut().zip(b"Htemp99e".iter()) {
+        *r = r.wrapping_sub(m << 4 | m >> 4);
+    }
+
+    data
+}
+
+impl Iterator for Sensor {
     type Item = AirQulityEvent;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut buf : [u8; 8] = [0; 8];
-        let dev = match &self.dev {
-            Some(dev) => dev,
-            None => return None,
+
+        let mut data : [u8; 8] = [0; 8];
+
+        let timeout = self.timeout
+            .unwrap_or(Duration::from_secs(1))
+            .as_millis() as i32;
+        if let result = self.dev.read_timeout(&mut data, timeout) {
+            println!("read = {:?}", result);
+        }
+
+        /* Step 2. Decode */
+        let mut data = if self.decode {
+            decrypt(data, self.key)
+        } else {
+            data
         };
-        let result = dev.read_timeout(&mut buf, 5000);
-
-        /* Decode */
-        buf.swap(0, 2);
-        buf.swap(1, 4);
-        buf.swap(3, 7);
-        buf.swap(5, 6);
-
-        for i in 0..8 {
-            buf[i] ^= self.magic_table[i];
-        }
-
-        let mut result : [u8; 8] = [0; 8];
-        let tmp : u8 = buf[7] << 5;
-        result[7] = (buf[6] << 5) | (buf[7] >> 3);
-        result[6] = (buf[5] << 5) | (buf[6] >> 3);
-        result[5] = (buf[4] << 5) | (buf[5] >> 3);
-        result[4] = (buf[3] << 5) | (buf[4] >> 3);
-        result[3] = (buf[2] << 5) | (buf[3] >> 3);
-        result[2] = (buf[1] << 5) | (buf[2] >> 3);
-        result[1] = (buf[0] << 5) | (buf[1] >> 3);
-        result[0] = tmp | (buf[0] >> 3);
-
-        let magic_word : [u8; 8] = [
-            'H' as u8,
-            't' as u8,
-            'e' as u8,
-            'm' as u8,
-            'p' as u8,
-            '9' as u8,
-            '9' as u8,
-            'e' as u8,
-        ];
-        for i in 0..8 {
-            let mask : u8 = (magic_word[i] << 4) | (magic_word[i] >> 4);
-            result[i] = result[i].wrapping_sub(mask);
-        }
 
         /* Check error message */
-        if result[4] != 0x0d {
-            warn!("Unexpected data from device (data[4] = {:02x}, want 0x0d)", result[4]);
+        if data[4] != 0x0d {
+            dump(&data);
+            warn!("Unexpected data from device (data[4] = {:02x}, want 0x0d)", data[4]);
             return Some(AirQulityEvent::UnexpectedData);
         }
 
         /* Checksum */
-        let r0 : u8 = result[0];
-        let r1 : u8 = result[1];
-        let r2 : u8 = result[2];
-        let r3 : u8 = result[3];
+        let r0 : u8 = data[0];
+        let r1 : u8 = data[1];
+        let r2 : u8 = data[2];
+        let r3 : u8 = data[3];
         let checksum = 0u8
             .wrapping_add(r0)
             .wrapping_add(r1)
@@ -111,64 +124,114 @@ impl Iterator for AirQualityMonitor {
 
         /* Debug message on debug mode */
         if self.debug {
-            dump(&result);
+            dump(&data);
         }
 
         /* Decode result */
-        let w : u16 = ((result[1] as u16) << 8) + result[2] as u16;
+        let w : u16 = ((data[1] as u16) << 8) + data[2] as u16;
         match r0 {
             CODE_HUMD => {
                 let h = decode_humidity(w);
-                return Some(AirQulityEvent::Humidity{ value: h });
+                Some(AirQulityEvent::Humidity{ value: h })
             },
             CODE_TAMB => {
                 let t = decode_temperature(w);
                 info!("Ambient Temperature is {}", t);
-                return Some(AirQulityEvent::AmbientTemperature { temp: t });
+                Some(AirQulityEvent::AmbientTemperature { temp: t })
             },
             CODE_CNTR => {
                 if w > 3000 {
                     /* Avoid reading spurious (uninitialized?) data */
                     warn!("Reading spurious data. Please wait.");
-                    return Some(AirQulityEvent::UninitializeData);
+                    Some(AirQulityEvent::UninitializeData)
                 } else {
                     info!("Relative Concentration of CO2 is {}", w);
-                    return Some(AirQulityEvent::RelativeConcentration { value: w });
+                    Some(AirQulityEvent::RelativeConcentration { value: w })
                 }
             },
             _ => {
                 debug!("Unknown code {:02x} value {:?}", r0, w);
-                return Some(AirQulityEvent::UnknownCode);
+                Some(AirQulityEvent::UnknownCode(data))
             }
         }
-
-        None
     }
 }
 
-impl AirQualityMonitor {
+impl Sensor {
 
+    fn open(options: &OpenOptions) -> Result<Self> {
+        let hidapi = HidApi::new()?;
+
+        const VID: u16 = 0x04d9;
+        const PID: u16 = 0xa052;
+
+        let device = hidapi.open(VID, PID)?;
+
+        let info = device.get_device_info().unwrap();
+        let release_number = info.release_number();
+        println!("release_number = {:?}", release_number);
+        let decode = if (release_number >  0x0100) {
+            false
+        } else {
+            true
+        };
+
+        let key = options.key;
+
+        let frame = {
+            let mut frame = [0; 9];
+            frame[1..9].copy_from_slice(&key);
+            frame
+        };
+
+        let result = device.send_feature_report(&frame);
+        println!("init = {:?}", result);
+
+        Ok(Self {
+            dev: device,
+            debug: false,
+            decode: decode,
+            key: key,
+            timeout: Some(Duration::from_secs(1)),
+        })
+    }
+
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenOptions {
+//    path_type: DevicePathType,
+    key: [u8; 8],
+    timeout: Option<Duration>,
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OpenOptions {
     pub fn new() -> Self {
-        AirQualityMonitor {
-            dev: None,
-            debug: true,
-            magic_table: [0; 8],
+        Self {
+//            path_type: DevicePathType::Id,
+            key: [0; 8],
+            timeout: Some(Duration::from_secs(5)),
         }
     }
 
-    pub fn open(&mut self) {
-        match HidApi::new() {
-            Ok(api) => {
-                let device = api.open(0x04d9, 0xa052).unwrap();
+    pub fn with_key(&mut self, key: [u8; 8]) -> &mut Self {
+        self.key = key;
+        self
+    }
 
-                let result = device.send_feature_report(&self.magic_table);
+    pub fn timeout(&mut self, timeout: Option<Duration>) -> &mut Self {
+        self.timeout = timeout;
+        self
+    }
 
-                self.dev = Some(device);
-            },
-            Err(e) => {
-                panic!("Error: {}", e);
-            }
-        }
+    pub fn open(&self) -> Result<Sensor> {
+        Sensor::open(self)
     }
 
 }
