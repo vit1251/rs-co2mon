@@ -2,54 +2,22 @@
 use std::env;
 use std::time::Duration;
 
-use log::LevelFilter;
+use log::{LevelFilter, debug};
 use env_logger::Builder;
 
 use telegraf::{Client, Point};
 
-use rs_co2mon::{Sensor, OpenOptions};
+use rs_co2mon::AirQulityEvent;
+use rs_co2mon::OpenOptions;
 use rs_co2mon::AirQulityEvent::AmbientTemperature;
 use rs_co2mon::AirQulityEvent::RelativeConcentration;
 
-fn main() {
+fn report(mon: &mut Monitor, event: &AirQulityEvent) {
 
-    let mut enable_telegraf: bool = false;
-    let mut enable_debug: bool = false;
-    let mut verbose: bool = true;
+    if let Some(ref mut conn) = mon.telegraf_client {
 
-    let mut c: Option<Client> = None;
-
-    /* Step 1. Parse arguments*/
-    for argument in env::args() {
-        if argument == "--debug" {
-            enable_debug = true;
-        }
-        if argument == "--telegraf" {
-            enable_telegraf = true;
-            c = Some(Client::new("tcp://localhost:8094").unwrap());
-        }
-        if argument == "--help" {
-            // TODO - write help message...
-        }
-    }
-
-    /* Step 2. Initialize report system */
-    if enable_debug {
-        Builder::new().filter_level(LevelFilter::Debug).init();
-    }
-
-    /* Step 3. Create Air Quality Monitor */
-    let mut sensor = OpenOptions::new()
-        .with_key([0x62, 0xea, 0x1d, 0x4f, 0x14, 0xfa, 0xe5, 0x6c])
-//        .debug(true)
-        .timeout(Some(Duration::from_secs(1)))
-        .open()
-        .unwrap();
-
-    for event in sensor {
-        if let Some(ref mut conn) = c {
-            match event {
-                AmbientTemperature { temp } => {
+    match *event {
+        AmbientTemperature { temp } => {
                     let p = Point::new(
                         String::from("co2monitor"),
                         vec![
@@ -79,9 +47,60 @@ fn main() {
 
                 },
             }
+    }
+}
+
+struct Monitor {
+    telegraf_enable: bool,           /* Delivery metric on Telegraf proxy */
+    telegraf_client: Option<Client>, /* Telegraf client                   */
+    enable_debug: bool,              /* Show debug output                 */
+}
+
+impl Monitor {
+    fn new() -> Self {
+        Monitor {
+            telegraf_enable: false,
+            telegraf_client: None,
+            enable_debug: false,
         }
-        if verbose {
-            println!("event = {:?}", event);
+    }
+}
+
+fn main() {
+
+    let mut mon: Monitor = Monitor::new();
+
+    /* Step 1. Parse arguments*/
+    for argument in env::args() {
+        if argument == "--debug" {
+            mon.enable_debug = true;
+        }
+        if argument == "--telegraf" {
+            mon.telegraf_enable = true;
+            mon.telegraf_client = Some(Client::new("http://127.0.0.1:8186").unwrap());
+        }
+    }
+
+    /* Step 2. Initialize debug system */
+    if mon.enable_debug {
+        Builder::new().filter_level(LevelFilter::Debug).init();
+    }
+
+    /* Step 3. Create Air Quality Monitor */
+    let mut sensor = OpenOptions::new()
+        .with_key([0x62, 0xea, 0x1d, 0x4f, 0x14, 0xfa, 0xe5, 0x6c])
+        .timeout(Some(Duration::from_secs(5)))
+        .debug(mon.enable_debug)
+        .open()
+        .unwrap();
+
+    /* Step 4. Process sensor monitoring */
+    loop {
+        if let Some(event) = sensor.read() {
+            if mon.enable_debug {
+                debug!("event = {:?}", event);
+            }
+            report(&mut mon, &event);
         }
     }
 

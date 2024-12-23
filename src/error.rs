@@ -1,7 +1,5 @@
 
 use hidapi::HidError;
-use std::error;
-use std::fmt::{self, Display, Formatter};
 
 /// A possible error value when opening the sensor or taking a reading.
 #[derive(Debug)]

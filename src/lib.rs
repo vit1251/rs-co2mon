@@ -1,7 +1,7 @@
 
 use std::time::Duration; 
 
-use log::{info, trace, warn, debug, error};
+use log::{warn, info, debug};
 
 use hidapi::HidApi;
 use hidapi::HidDevice;
@@ -45,7 +45,8 @@ pub enum AirQulityEvent {
     AmbientTemperature { temp: f64 },
     RelativeConcentration { value: u16 },
     Humidity { value: f64 },
-    UnexpectedData,
+    UnexpectedData([u8; 8]),
+    WrongPacket,
     ChecksumError,
     UninitializeData,
     UnknownCode([u8; 8]),
@@ -79,22 +80,70 @@ fn decrypt(mut data: [u8; 8], key: [u8; 8]) -> [u8; 8] {
     data
 }
 
-impl Iterator for Sensor {
-    type Item = AirQulityEvent;
 
-    fn next(&mut self) -> Option<Self::Item> {
+impl Sensor {
+
+    fn open(options: &OpenOptions) -> Result<Self> {
+        let hidapi = HidApi::new()?;
+
+        const VID: u16 = 0x04d9;
+        const PID: u16 = 0xa052;
+
+        let device = hidapi.open(VID, PID)?;
+
+        let info = device.get_device_info().unwrap();
+        let release_number = info.release_number();
+        info!("Device: release-number = {:#04x}", release_number);
+        let decode = if release_number > 0x0100 {
+            false
+        } else {
+            true
+        };
+
+        let key = options.key;
+
+        let frame = {
+            let mut frame = [0; 9];
+            frame[1..9].copy_from_slice(&key);
+            frame
+        };
+
+        if let Ok(result) = device.send_feature_report(&frame) {
+            debug!("init = {:?}", result);
+            // TODO - process send feature error...
+        }
+
+        let debug = options.debug;
+
+        Ok(Self {
+            dev: device,
+            debug: debug,
+            decode: decode,
+            key: key,
+            timeout: None,
+        })
+    }
+
+    pub fn read(&mut self) -> Option<AirQulityEvent> {
 
         let mut data : [u8; 8] = [0; 8];
 
         let timeout = self.timeout
-            .unwrap_or(Duration::from_secs(1))
+            .unwrap_or(Duration::from_secs(5))
             .as_millis() as i32;
-        if let result = self.dev.read_timeout(&mut data, timeout) {
-            println!("read = {:?}", result);
+
+        if let Ok(size) = self.dev.read_timeout(&mut data, timeout) {
+            if size == 8 {
+            } else {
+                debug!("read_timeout: size = {:?}", size);
+                return Some(AirQulityEvent::WrongPacket);
+            }
+        } else {
+            return None;
         }
 
         /* Step 2. Decode */
-        let mut data = if self.decode {
+        let data = if self.decode {
             decrypt(data, self.key)
         } else {
             data
@@ -104,7 +153,7 @@ impl Iterator for Sensor {
         if data[4] != 0x0d {
             dump(&data);
             warn!("Unexpected data from device (data[4] = {:02x}, want 0x0d)", data[4]);
-            return Some(AirQulityEvent::UnexpectedData);
+            return Some(AirQulityEvent::UnexpectedData(data));
         }
 
         /* Checksum */
@@ -129,6 +178,9 @@ impl Iterator for Sensor {
 
         /* Decode result */
         let w : u16 = ((data[1] as u16) << 8) + data[2] as u16;
+        if self.debug {
+            debug!("code = {} value = {}", r0, w);
+        }
         match r0 {
             CODE_HUMD => {
                 let h = decode_humidity(w);
@@ -155,46 +207,6 @@ impl Iterator for Sensor {
             }
         }
     }
-}
-
-impl Sensor {
-
-    fn open(options: &OpenOptions) -> Result<Self> {
-        let hidapi = HidApi::new()?;
-
-        const VID: u16 = 0x04d9;
-        const PID: u16 = 0xa052;
-
-        let device = hidapi.open(VID, PID)?;
-
-        let info = device.get_device_info().unwrap();
-        let release_number = info.release_number();
-        println!("release_number = {:?}", release_number);
-        let decode = if (release_number >  0x0100) {
-            false
-        } else {
-            true
-        };
-
-        let key = options.key;
-
-        let frame = {
-            let mut frame = [0; 9];
-            frame[1..9].copy_from_slice(&key);
-            frame
-        };
-
-        let result = device.send_feature_report(&frame);
-        println!("init = {:?}", result);
-
-        Ok(Self {
-            dev: device,
-            debug: false,
-            decode: decode,
-            key: key,
-            timeout: Some(Duration::from_secs(1)),
-        })
-    }
 
 }
 
@@ -202,6 +214,7 @@ impl Sensor {
 pub struct OpenOptions {
 //    path_type: DevicePathType,
     key: [u8; 8],
+    debug: bool,
     timeout: Option<Duration>,
 }
 
@@ -216,8 +229,14 @@ impl OpenOptions {
         Self {
 //            path_type: DevicePathType::Id,
             key: [0; 8],
+            debug: false,
             timeout: Some(Duration::from_secs(5)),
         }
+    }
+
+    pub fn debug(&mut self, yesno: bool) -> &mut Self {
+        self.debug = yesno;
+        self
     }
 
     pub fn with_key(&mut self, key: [u8; 8]) -> &mut Self {
