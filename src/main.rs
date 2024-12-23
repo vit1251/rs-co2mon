@@ -77,7 +77,7 @@ fn main() {
         }
         if argument == "--telegraf" {
             mon.telegraf_enable = true;
-            mon.telegraf_client = Some(Client::new("http://127.0.0.1:8186").unwrap());
+            mon.telegraf_client = Some(Client::new("tcp://127.0.0.1:8094").unwrap());
         }
     }
 

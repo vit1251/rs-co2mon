@@ -2,9 +2,9 @@
 
 # Usage
 
-    # RUST_LOG=info ./rs-co2mon
+    # sudo ./rs-co2mon --debug --telegraf
 
-or 
+# Setup Telegraf
 
-    $ sudo RUST_LOG=info ./rs-co2mon
+Use `socket_listener` input socket on port 8094.
 
